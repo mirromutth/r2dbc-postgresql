@@ -18,13 +18,17 @@ package io.r2dbc.postgresql;
 
 import io.netty.handler.ssl.SslContextBuilder;
 import io.netty.handler.ssl.util.InsecureTrustManagerFactory;
+import io.r2dbc.postgresql.client.ConnectionSettings;
 import io.r2dbc.postgresql.client.DefaultHostnameVerifier;
 import io.r2dbc.postgresql.client.SSLConfig;
 import io.r2dbc.postgresql.client.SSLMode;
 import io.r2dbc.postgresql.codec.Codec;
 import io.r2dbc.postgresql.extension.CodecRegistrar;
 import io.r2dbc.postgresql.extension.Extension;
+import io.r2dbc.postgresql.message.backend.ErrorResponse;
+import io.r2dbc.postgresql.message.backend.NoticeResponse;
 import io.r2dbc.postgresql.util.Assert;
+import io.r2dbc.postgresql.util.LogLevel;
 import reactor.netty.tcp.SslProvider;
 import reactor.util.annotation.Nullable;
 
@@ -58,9 +62,13 @@ public final class PostgresqlConnectionConfiguration {
 
     private final String database;
 
+    private final LogLevel errorResponseLogLevel;
+
     private final List<Extension> extensions;
 
     private final boolean forceBinary;
+
+    private final LogLevel noticeLogLevel;
 
     private final String host;
 
@@ -81,15 +89,19 @@ public final class PostgresqlConnectionConfiguration {
     private final int preparedStatementCacheQueries;
 
     private PostgresqlConnectionConfiguration(String applicationName, boolean autodetectExtensions,
-                                              @Nullable Duration connectTimeout, @Nullable String database, List<Extension> extensions, boolean forceBinary, @Nullable String host,
-                                              @Nullable Map<String, String> options, @Nullable CharSequence password, int port, @Nullable String schema, @Nullable String socket, String username,
+                                              @Nullable Duration connectTimeout, @Nullable String database, LogLevel errorResponseLogLevel, List<Extension> extensions, boolean forceBinary,
+                                              LogLevel noticeLogLevel, @Nullable String host,
+                                              @Nullable Map<String, String> options, @Nullable CharSequence password, int port, @Nullable String schema,
+                                              @Nullable String socket, String username,
                                               SSLConfig sslConfig, int preparedStatementCacheQueries) {
         this.applicationName = Assert.requireNonNull(applicationName, "applicationName must not be null");
         this.autodetectExtensions = autodetectExtensions;
         this.connectTimeout = connectTimeout;
+        this.errorResponseLogLevel = errorResponseLogLevel;
         this.extensions = Assert.requireNonNull(extensions, "extensions must not be null");
         this.database = database;
         this.forceBinary = forceBinary;
+        this.noticeLogLevel = noticeLogLevel;
         this.host = host;
         this.options = options;
         this.password = password;
@@ -110,17 +122,18 @@ public final class PostgresqlConnectionConfiguration {
         return new Builder();
     }
 
-
     @Override
     public String toString() {
         return "PostgresqlConnectionConfiguration{" +
             "applicationName='" + this.applicationName + '\'' +
             ", autodetectExtensions='" + this.autodetectExtensions + '\'' +
             ", connectTimeout=" + this.connectTimeout +
+            ", errorResponseLogLevel=" + this.errorResponseLogLevel +
             ", database='" + this.database + '\'' +
             ", extensions=" + this.extensions +
             ", forceBinary='" + this.forceBinary + '\'' +
             ", host='" + this.host + '\'' +
+            ", noticeLogLevel='" + this.noticeLogLevel + '\'' +
             ", options='" + this.options + '\'' +
             ", password='" + obfuscate(this.password != null ? this.password.length() : 0) + '\'' +
             ", port=" + this.port +
@@ -218,6 +231,15 @@ public final class PostgresqlConnectionConfiguration {
         return this.sslConfig;
     }
 
+    ConnectionSettings getConnectionSettings() {
+        return ConnectionSettings.builder()
+            .connectTimeout(getConnectTimeout())
+            .errorResponseLogLevel(this.errorResponseLogLevel)
+            .noticeLogLevel(this.noticeLogLevel)
+            .sslConfig(getSslConfig())
+            .build();
+    }
+
     int getPreparedStatementCacheQueries() {
         return this.preparedStatementCacheQueries;
     }
@@ -250,12 +272,16 @@ public final class PostgresqlConnectionConfiguration {
         @Nullable
         private String database;
 
+        private LogLevel errorResponseLogLevel = LogLevel.DEBUG;
+
         private List<Extension> extensions = new ArrayList<>();
 
         private boolean forceBinary = false;
 
         @Nullable
         private String host;
+
+        private LogLevel noticeLogLevel = LogLevel.DEBUG;
 
         private Map<String, String> options;
 
@@ -338,12 +364,13 @@ public final class PostgresqlConnectionConfiguration {
                 throw new IllegalArgumentException("username must not be null");
             }
 
-            return new PostgresqlConnectionConfiguration(this.applicationName, this.autodetectExtensions, this.connectTimeout, this.database, this.extensions, this.forceBinary, this.host,
-                this.options, this.password, this.port, this.schema, this.socket, this.username, this.createSslConfig(), this.preparedStatementCacheQueries);
+            return new PostgresqlConnectionConfiguration(this.applicationName, this.autodetectExtensions, this.connectTimeout, this.database, this.errorResponseLogLevel, this.extensions,
+                this.forceBinary, this.noticeLogLevel, this.host, this.options, this.password, this.port, this.schema, this.socket, this.username, this.createSslConfig(),
+                this.preparedStatementCacheQueries);
         }
 
         /**
-         * Configures the connection timeout. Default unconfigured.
+         * Configure the connection timeout. Default unconfigured.
          *
          * @param connectTimeout the connection timeout
          * @return this {@link Builder}
@@ -354,7 +381,7 @@ public final class PostgresqlConnectionConfiguration {
         }
 
         /**
-         * Registers a {@link CodecRegistrar} that can contribute extension {@link Codec}s.
+         * Register a {@link CodecRegistrar} that can contribute extension {@link Codec}s.
          *
          * @param codecRegistrar registrar to contribute codecs
          * @return this {@link Builder}
@@ -395,6 +422,18 @@ public final class PostgresqlConnectionConfiguration {
         }
 
         /**
+         * Configure the {@link LogLevel} for {@link ErrorResponse error responses} that are part of a statement execution.
+         *
+         * @param errorResponseLogLevel the log level to use.
+         * @return this {@link Builder}
+         * @since 0.9
+         */
+        public Builder errorResponseLogLevel(LogLevel errorResponseLogLevel) {
+            this.errorResponseLogLevel = Assert.requireNonNull(errorResponseLogLevel, "errorResponseLogLevel must not be null");
+            return this;
+        }
+
+        /**
          * Force binary results (<a href="https://wiki.postgresql.org/wiki/JDBC-BinaryTransfer">Binary Transfer</a>). Defaults to false.
          *
          * @param forceBinary whether to force binary transfer
@@ -414,6 +453,18 @@ public final class PostgresqlConnectionConfiguration {
          */
         public Builder host(String host) {
             this.host = Assert.requireNonNull(host, "host must not be null");
+            return this;
+        }
+
+        /**
+         * Configure the {@link LogLevel} for {@link NoticeResponse notice responses}.
+         *
+         * @param noticeLogLevel the log level to use.
+         * @return this {@link Builder}
+         * @since 0.9
+         */
+        public Builder noticeLogLevel(LogLevel noticeLogLevel) {
+            this.noticeLogLevel = Assert.requireNonNull(noticeLogLevel, "noticeLogLevel must not be null");
             return this;
         }
 
@@ -599,8 +650,10 @@ public final class PostgresqlConnectionConfiguration {
                 ", connectTimeout='" + this.connectTimeout + '\'' +
                 ", database='" + this.database + '\'' +
                 ", extensions='" + this.extensions + '\'' +
+                ", errorResponseLogLevel='" + this.errorResponseLogLevel + '\'' +
                 ", forceBinary='" + this.forceBinary + '\'' +
                 ", host='" + this.host + '\'' +
+                ", noticeLogLevel='" + this.noticeLogLevel + '\'' +
                 ", parameters='" + this.options + '\'' +
                 ", password='" + obfuscate(this.password != null ? this.password.length() : 0) + '\'' +
                 ", port=" + this.port +
